@@ -1,0 +1,155 @@
+"""
+FairHire - Job Description Fairness Checker
+----------------------------------------------
+Job: This is the NEW "Pre-Prevention" layer - runs BEFORE any candidates are
+processed. Analyzes the job description itself for language patterns known
+to correlate with reduced application rates from underrepresented groups,
+and flags suggestions for the recruiter - who can revise or proceed anyway.
+
+This extends the three-layer fairness approach into four layers:
+  0. Pre-Prevention (NEW) - catch bias in the job posting itself
+  1. Prevention        - PII blinding at CV intake
+  2. Monitoring         - proxy-field bias auditing on rankings
+  3. Accountability     - human-in-the-loop + logging
+
+Setup:
+    pip install google-generativeai fastapi uvicorn
+
+Run standalone (sample data):
+    python jd_fairness_checker.py
+
+Run as an API:
+    uvicorn jd_fairness_checker:app --port 8004 --reload
+"""
+
+import os
+import re
+import json
+from typing import List
+
+import google.generativeai as genai
+from fastapi import FastAPI
+from pydantic import BaseModel
+
+API_KEY = os.environ.get("GEMINI_API_KEY", "")
+if API_KEY:
+    genai.configure(api_key=API_KEY)
+    model = genai.GenerativeModel("gemini-3.6-flash")
+else:
+    model = None
+
+
+def call_llm(prompt: str) -> str:
+    if model is None:
+        return "[LLM not configured - set GEMINI_API_KEY to enable real responses]"
+    response = model.generate_content(prompt)
+    return response.text.strip()
+
+
+# A small, known-pattern keyword list as a fast, non-LLM first pass -
+# genuine research (Textio, Gender Decoder, and similar studies) has shown
+# certain word categories correlate with reduced application rates.
+MASCULINE_CODED_WORDS = [
+    "dominant", "dominate", "aggressive", "competitive", "ninja", "rockstar",
+    "crush", "fearless", "superior", "relentless",
+]
+AGE_CODED_PHRASES = [
+    "young and energetic", "recent graduate preferred", "digital native",
+]
+VAGUE_EXCESSIVE_REQUIREMENTS = [
+    "10+ years", "must be an expert in everything", "unicorn",
+]
+
+
+def keyword_scan(job_description: str) -> List[dict]:
+    """Fast, deterministic first pass - no LLM needed, catches obvious cases instantly."""
+    text_lower = job_description.lower()
+    flags = []
+
+    for word in MASCULINE_CODED_WORDS:
+        if word in text_lower:
+            flags.append({
+                "term": word,
+                "category": "competitive/masculine-coded language",
+                "note": "Research (e.g. Gender Decoder, Textio) associates this "
+                        "kind of language with reduced application rates from women.",
+            })
+    for phrase in AGE_CODED_PHRASES:
+        if phrase in text_lower:
+            flags.append({
+                "term": phrase,
+                "category": "age-coded language",
+                "note": "This phrasing may discourage older applicants and can "
+                        "carry age-discrimination risk.",
+            })
+    for phrase in VAGUE_EXCESSIVE_REQUIREMENTS:
+        if phrase in text_lower:
+            flags.append({
+                "term": phrase,
+                "category": "excessive/vague requirement",
+                "note": "Overly broad requirements can discourage qualified "
+                        "candidates (especially women) who tend to under-apply "
+                        "unless they meet nearly all listed criteria.",
+            })
+    return flags
+
+
+def llm_deep_check(job_description: str) -> str:
+    """Second pass - LLM catches subtler patterns the keyword list would miss."""
+    prompt = f"""Analyze this job description for language patterns that could
+reduce application rates from underrepresented groups (e.g. subtly gendered
+wording, exclusionary jargon, unnecessary requirements). Job description:
+
+{job_description}
+
+List up to 3 specific concerns in plain English, or say "No significant
+concerns found" if none apply. Do not rewrite the job description, just
+identify concerns."""
+    return call_llm(prompt)
+
+
+def check_job_description(job_description: str) -> dict:
+    keyword_flags = keyword_scan(job_description)
+    llm_notes = llm_deep_check(job_description)
+
+    return {
+        "keyword_flags": keyword_flags,
+        "llm_analysis": llm_notes,
+        "recommendation": (
+            "Consider revising the flagged language before posting."
+            if keyword_flags else
+            "No obvious exclusionary patterns detected by the keyword scan; "
+            "see LLM analysis above for subtler concerns."
+        ),
+        "note": "This check informs the recruiter - it does not block posting. "
+                "The recruiter decides whether to revise or proceed.",
+    }
+
+
+# ---------------------------------------------------------------
+# FastAPI wrapper
+# ---------------------------------------------------------------
+app = FastAPI(title="FairHire Job Description Fairness Checker")
+
+
+class JDRequest(BaseModel):
+    job_description: str
+
+
+@app.get("/health")
+def health():
+    return {"status": "ok", "agent": "jd_fairness_checker", "llm_configured": model is not None}
+
+
+@app.post("/check")
+def check_endpoint(request: JDRequest):
+    return check_job_description(request.job_description)
+
+
+if __name__ == "__main__":
+    sample_jd = (
+        "We're looking for a rockstar Data Analyst who can dominate the "
+        "competition. Must be a young and energetic self-starter with "
+        "10+ years of experience in every BI tool imaginable."
+    )
+    print(json.dumps(check_job_description(sample_jd), indent=2))

@@ -77,6 +77,27 @@ def compute_keyword_scores(job_description, candidates):
     return [float(s / max_score) for s in raw_scores]
 
 
+def extract_required_skills(job_description):
+    """
+    Simple extraction of likely required skills from the job description,
+    by checking which known skill keywords appear in the text as whole
+    words (not substrings - e.g. "r" must not match inside "for").
+    """
+    known_skills = [
+        "python", "sql", "java", "javascript", "r", "excel", "power bi",
+        "tableau", "machine learning", "data analysis", "pandas", "numpy",
+        "scikit-learn", "tensorflow", "aws", "azure", "docker", "git",
+    ]
+    jd_lower = job_description.lower()
+    found = []
+    for skill in known_skills:
+        # \b = word boundary, so "r" matches "R" but not the "r" inside "for"
+        pattern = r"\b" + re.escape(skill) + r"\b"
+        if re.search(pattern, jd_lower):
+            found.append(skill)
+    return found
+
+
 def rank_candidates(job_description, candidates, relaxed=False):
     """
     Core ranking function. If relaxed=True, this represents the "widened
@@ -87,15 +108,23 @@ def rank_candidates(job_description, candidates, relaxed=False):
     """
     semantic_scores = compute_semantic_scores(job_description, candidates)
     keyword_scores = compute_keyword_scores(job_description, candidates)
+    required_skills = extract_required_skills(job_description)
 
     results = []
     for cand, sem, kw in zip(candidates, semantic_scores, keyword_scores):
         final_score = (SEMANTIC_WEIGHT * sem) + (KEYWORD_WEIGHT * kw)
+        candidate_skills_lower = [s.lower() for s in cand.get("skills", [])]
+        matched = [s for s in required_skills if s in candidate_skills_lower]
+        missing = [s for s in required_skills if s not in candidate_skills_lower]
+
         results.append({
             "candidate_id": cand["candidate_id"],
             "semantic_score": round(sem, 3),
             "keyword_score": round(kw, 3),
             "final_score": round(final_score, 3),
+            # --- New: feeds the Explainer Agent's verifiable_data field ---
+            "matched_skills": matched,
+            "missing_skills": missing,
         })
 
     results.sort(key=lambda x: x["final_score"], reverse=True)
