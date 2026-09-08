@@ -29,9 +29,17 @@ Run as an API other agents can call:
 import os
 import json
 import warnings
+import sys
 from typing import List, Optional, Dict
 
+from dotenv import load_dotenv
+load_dotenv()  # reads the .env file in the project root, if present
+
 warnings.filterwarnings("ignore", category=FutureWarning)
+
+# Import the shared database module (lives in ../database relative to this file)
+sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "database"))
+from db import init_db, save_ranking, log_bias_audit
 
 import google.generativeai as genai
 from fastapi import FastAPI
@@ -191,6 +199,7 @@ or ranking number."""
 # FastAPI wrapper
 # ---------------------------------------------------------------
 app = FastAPI(title="FairHire Explainer Agent")
+init_db()  # creates tables if they don't exist yet - safe to call every startup
 
 
 class Candidate(BaseModel):
@@ -206,6 +215,7 @@ class Candidate(BaseModel):
 class ExplainRequest(BaseModel):
     job_description: str
     candidates: List[Candidate]
+    job_id: Optional[int] = None   # if provided, results update the saved ranking rows
 
 
 @app.get("/health")
@@ -215,23 +225,55 @@ def health():
 
 @app.post("/explain")
 def explain_endpoint(request: ExplainRequest):
-    """Generates an explanation + skills-gap feedback (if applicable) for each candidate."""
+    """
+    Generates an explanation + skills-gap feedback for each candidate.
+    If job_id is provided, the explanation and consistency-check result are
+    saved back onto that candidate's ranking row in the database, so the
+    Dashboard can read the full picture (score + explanation together).
+    """
     results = []
     for c in request.candidates:
         c_dict = c.dict()
+        explanation_result = generate_explanation(c_dict, request.job_description)
+        skills_gap = generate_skills_gap_feedback(c_dict, request.job_description)
+
         results.append({
             "candidate_id": c.candidate_id,
-            "explanation": generate_explanation(c_dict, request.job_description),
-            "skills_gap_feedback": generate_skills_gap_feedback(c_dict, request.job_description),
+            "explanation": explanation_result["explanation"],
+            "consistency_check": explanation_result["consistency_check"],
+            "verifiable_data": explanation_result["verifiable_data"],
+            "skills_gap_feedback": skills_gap,
         })
+
+        if request.job_id is not None:
+            save_ranking(
+                c.candidate_id, request.job_id,
+                c.semantic_score, c.keyword_score, c.final_score,
+                matched_skills=c.skills, missing_skills=c.missing_skills,
+                explanation=explanation_result["explanation"],
+                consistency_check_passed=explanation_result["consistency_check"]["passed"],
+            )
+
     return {"explanations": results}
 
 
 @app.post("/audit")
 def audit_endpoint(request: ExplainRequest):
-    """Runs the bias audit across all ranked candidates."""
+    """
+    Runs the bias audit across all ranked candidates. If job_id is provided,
+    the result is logged to bias_audit_log for a permanent audit trail.
+    """
     candidates_as_dicts = [c.dict() for c in request.candidates]
-    return audit_bias(candidates_as_dicts)
+    result = audit_bias(candidates_as_dicts)
+
+    if request.job_id is not None and "avg_score_with_employment_gap" in result:
+        log_bias_audit(
+            request.job_id, result["flagged"],
+            result["avg_score_with_employment_gap"],
+            result["avg_score_without_employment_gap"],
+            result["note"],
+        )
+    return result
 
 
 @app.post("/interview-questions")
