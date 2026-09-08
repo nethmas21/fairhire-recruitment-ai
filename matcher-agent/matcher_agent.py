@@ -27,8 +27,14 @@ os.environ["HF_HUB_ETAG_TIMEOUT"] = "120"
 
 import json
 import re
-from typing import List, Optional
+import sys
+import os
 
+# Import the shared database module (lives in ../database relative to this file)
+sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "database"))
+from db import init_db, save_candidate, save_ranking, get_job
+
+from typing import List, Optional
 from fastapi import FastAPI
 from pydantic import BaseModel
 from sentence_transformers import SentenceTransformer, util
@@ -131,11 +137,15 @@ def rank_candidates(job_description, candidates, relaxed=False):
     return results
 
 
-def match(job_description, candidates):
+def match(job_description, candidates, job_id=None):
     """
     Main entry point. Implements the agentic threshold-widening behavior
     from the master spec: if too few candidates clear MIN_MATCH_THRESHOLD,
     automatically re-rank with a lower threshold once.
+
+    If job_id is provided, each candidate and their ranking is saved to the
+    shared database - this is what lets the Explainer Agent and Dashboard
+    read this data later, instead of it only existing in this response.
     """
     results = rank_candidates(job_description, candidates)
 
@@ -150,6 +160,17 @@ def match(job_description, candidates):
                 f"automatically widened to {widened_threshold}.")
     else:
         note = "Standard threshold applied - no widening needed."
+
+    if job_id is not None:
+        candidates_by_id = {c["candidate_id"]: c for c in candidates}
+        for r in results:
+            cand = candidates_by_id[r["candidate_id"]]
+            save_candidate(r["candidate_id"], job_id, skills=cand.get("skills", []),
+                            organizations=cand.get("organizations", []))
+            save_ranking(r["candidate_id"], job_id, r["semantic_score"],
+                         r["keyword_score"], r["final_score"],
+                         matched_skills=r["matched_skills"],
+                         missing_skills=r["missing_skills"])
 
     return {
         "ranked_candidates": results,
@@ -166,6 +187,7 @@ FastAPI wrapper - this is what makes the Matcher Agent a real
 """
 
 app = FastAPI(title="FairHire Matcher Agent")
+init_db()  # creates tables if they don't exist yet - safe to call every startup
 
 
 class Candidate(BaseModel):
@@ -177,6 +199,7 @@ class Candidate(BaseModel):
 class MatchRequest(BaseModel):
     job_description: str
     candidates: List[Candidate]
+    job_id: Optional[int] = None   # if provided, results are saved to the database
 
 
 @app.get("/health")
@@ -194,12 +217,12 @@ def match_endpoint(request: MatchRequest):
         import requests
         response = requests.post(
             "http://localhost:8002/match",
-            json={"job_description": job_text, "candidates": candidate_list},
+            json={"job_description": job_text, "candidates": candidate_list, "job_id": 1},
         )
         ranked = response.json()
     """
     candidates_as_dicts = [c.dict() for c in request.candidates]
-    return match(request.job_description, candidates_as_dicts)
+    return match(request.job_description, candidates_as_dicts, job_id=request.job_id)
 
 
 if __name__ == "__main__":

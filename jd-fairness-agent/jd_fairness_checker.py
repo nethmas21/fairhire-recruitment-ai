@@ -25,7 +25,15 @@ Run as an API:
 import os
 import re
 import json
+import sys
 from typing import List
+
+from dotenv import load_dotenv
+load_dotenv()  # reads the .env file in the project root, if present
+
+# Import the shared database module (lives in ../database relative to this file)
+sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "database"))
+from db import init_db, save_job
 
 import google.generativeai as genai
 from fastapi import FastAPI
@@ -130,10 +138,18 @@ def check_job_description(job_description: str) -> dict:
 # FastAPI wrapper
 # ---------------------------------------------------------------
 app = FastAPI(title="FairHire Job Description Fairness Checker")
+init_db()  # creates tables if they don't exist yet - safe to call every startup
 
 
 class JDRequest(BaseModel):
     job_description: str
+    title: str = "Untitled role"
+
+
+class ConfirmJobRequest(BaseModel):
+    title: str
+    job_description: str
+    proceed_despite_flags: bool = False  # recruiter's explicit choice
 
 
 @app.get("/health")
@@ -143,7 +159,30 @@ def health():
 
 @app.post("/check")
 def check_endpoint(request: JDRequest):
+    """
+    Step 1: check the job description BEFORE it's saved as a real posting.
+    This does NOT save anything to the database yet - it just returns
+    flags so the recruiter can decide whether to revise or proceed.
+    """
     return check_job_description(request.job_description)
+
+
+@app.post("/confirm-and-post")
+def confirm_and_post_endpoint(request: ConfirmJobRequest):
+    """
+    Step 2: once the recruiter has seen the /check results and decided to
+    revise or proceed anyway, THIS is what actually creates the job in the
+    database - with the fairness check result permanently attached, so
+    there's a record of what was flagged (or not) when the job went live.
+    """
+    check_result = check_job_description(request.job_description)
+    job_id = save_job(request.title, request.job_description,
+                       fairness_check_flags=check_result["keyword_flags"])
+    return {
+        "job_id": job_id,
+        "fairness_check": check_result,
+        "posted_despite_flags": bool(check_result["keyword_flags"]) and request.proceed_despite_flags,
+    }
 
 
 if __name__ == "__main__":
