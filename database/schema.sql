@@ -56,11 +56,14 @@ CREATE TABLE IF NOT EXISTS decisions_log (
     decision_id INTEGER PRIMARY KEY AUTOINCREMENT,
     candidate_id TEXT NOT NULL,
     job_id INTEGER NOT NULL,
+    stage TEXT NOT NULL DEFAULT 'shortlist',  -- 'shortlist' | 'final'
     decision TEXT NOT NULL,           -- 'accepted' | 'rejected'
     reason TEXT,                       -- optional recruiter note
     interview_date TEXT,
     interview_time TEXT,
+    interview_location TEXT,
     decided_by TEXT,                   -- recruiter username
+    notified INTEGER DEFAULT 0,        -- 0 = email not sent yet, 1 = sent
     created_at TEXT DEFAULT (datetime('now')),
     FOREIGN KEY (candidate_id) REFERENCES candidates(candidate_id)
 );
