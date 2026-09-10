@@ -27,12 +27,42 @@ os.environ["HF_HUB_ETAG_TIMEOUT"] = "120"
 
 import json
 import re
-from typing import List, Optional
+import sys
+import os
+import warnings
 
+from dotenv import load_dotenv
+load_dotenv()
+
+warnings.filterwarnings("ignore", category=FutureWarning)
+
+# Import the shared database module (lives in ../database relative to this file)
+sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "database"))
+from db import init_db, save_candidate, save_ranking, get_job
+
+from typing import List, Optional
 from fastapi import FastAPI
 from pydantic import BaseModel
 from sentence_transformers import SentenceTransformer, util
 from rank_bm25 import BM25Okapi
+import google.generativeai as genai
+
+API_KEY = os.environ.get("GEMINI_API_KEY", "")
+if API_KEY:
+    genai.configure(api_key=API_KEY)
+    llm_model = genai.GenerativeModel("gemini-3.6-flash")
+else:
+    llm_model = None
+
+
+def call_llm(prompt: str) -> str:
+    if llm_model is None:
+        return None
+    try:
+        response = llm_model.generate_content(prompt)
+        return response.text.strip()
+    except Exception:
+        return None
 
 
 def tokenize(text):
@@ -77,11 +107,47 @@ def compute_keyword_scores(job_description, candidates):
     return [float(s / max_score) for s in raw_scores]
 
 
+def expand_skills_with_llm(job_description, known_skills):
+    """
+    LLM component of the Matcher Agent: query expansion. If a job says
+    "data visualization" but never says "Power BI" explicitly, a candidate
+    whose CV literally says "Power BI" would otherwise be under-counted on
+    keyword matching, even though they clearly have the skill the job
+    wants. The LLM suggests which of our KNOWN skill keywords are closely
+    related to what the job actually describes, so BM25/skill-matching
+    can credit candidates for related skills too - not just literal
+    keyword overlap.
+
+    Falls back to an empty list (no expansion) if the LLM isn't configured
+    or fails - matching still works correctly without this, just less
+    generously on paraphrased skills.
+    """
+    if llm_model is None:
+        return []
+
+    prompt = (
+        f"Job description: {job_description}\n\n"
+        f"From this list of skills, which ones are CLOSELY RELATED to what "
+        f"this job needs, even if not explicitly named in the description? "
+        f"Skills list: {', '.join(known_skills)}\n"
+        f"Reply with a comma-separated list only, no explanation. If none "
+        f"apply, reply 'none'."
+    )
+    result = call_llm(prompt)
+    if not result or result.strip().lower() == "none":
+        return []
+    suggested = [s.strip().lower() for s in result.split(",") if s.strip()]
+    # Only keep suggestions that are actually in our known skill list -
+    # guards against the LLM inventing skills we don't track.
+    return [s for s in suggested if s in known_skills]
+
+
 def extract_required_skills(job_description):
     """
-    Simple extraction of likely required skills from the job description,
-    by checking which known skill keywords appear in the text as whole
-    words (not substrings - e.g. "r" must not match inside "for").
+    Extraction of likely required skills from the job description: first
+    a fast, exact word-boundary match (no LLM needed), THEN an LLM query
+    expansion pass adds closely-related skills the JD implies but never
+    states outright (e.g. "data visualization" implying "power bi").
     """
     known_skills = [
         "python", "sql", "java", "javascript", "r", "excel", "power bi",
@@ -95,6 +161,12 @@ def extract_required_skills(job_description):
         pattern = r"\b" + re.escape(skill) + r"\b"
         if re.search(pattern, jd_lower):
             found.append(skill)
+
+    expanded = expand_skills_with_llm(job_description, known_skills)
+    for skill in expanded:
+        if skill not in found:
+            found.append(skill)
+
     return found
 
 
@@ -131,11 +203,15 @@ def rank_candidates(job_description, candidates, relaxed=False):
     return results
 
 
-def match(job_description, candidates):
+def match(job_description, candidates, job_id=None):
     """
     Main entry point. Implements the agentic threshold-widening behavior
     from the master spec: if too few candidates clear MIN_MATCH_THRESHOLD,
     automatically re-rank with a lower threshold once.
+
+    If job_id is provided, each candidate and their ranking is saved to the
+    shared database - this is what lets the Explainer Agent and Dashboard
+    read this data later, instead of it only existing in this response.
     """
     results = rank_candidates(job_description, candidates)
 
@@ -150,6 +226,17 @@ def match(job_description, candidates):
                 f"automatically widened to {widened_threshold}.")
     else:
         note = "Standard threshold applied - no widening needed."
+
+    if job_id is not None:
+        candidates_by_id = {c["candidate_id"]: c for c in candidates}
+        for r in results:
+            cand = candidates_by_id[r["candidate_id"]]
+            save_candidate(r["candidate_id"], job_id, skills=cand.get("skills", []),
+                            organizations=cand.get("organizations", []))
+            save_ranking(r["candidate_id"], job_id, r["semantic_score"],
+                         r["keyword_score"], r["final_score"],
+                         matched_skills=r["matched_skills"],
+                         missing_skills=r["missing_skills"])
 
     return {
         "ranked_candidates": results,
@@ -166,6 +253,7 @@ FastAPI wrapper - this is what makes the Matcher Agent a real
 """
 
 app = FastAPI(title="FairHire Matcher Agent")
+init_db()  # creates tables if they don't exist yet - safe to call every startup
 
 
 class Candidate(BaseModel):
@@ -177,6 +265,7 @@ class Candidate(BaseModel):
 class MatchRequest(BaseModel):
     job_description: str
     candidates: List[Candidate]
+    job_id: Optional[int] = None   # if provided, results are saved to the database
 
 
 @app.get("/health")
@@ -194,12 +283,12 @@ def match_endpoint(request: MatchRequest):
         import requests
         response = requests.post(
             "http://localhost:8002/match",
-            json={"job_description": job_text, "candidates": candidate_list},
+            json={"job_description": job_text, "candidates": candidate_list, "job_id": 1},
         )
         ranked = response.json()
     """
     candidates_as_dicts = [c.dict() for c in request.candidates]
-    return match(request.job_description, candidates_as_dicts)
+    return match(request.job_description, candidates_as_dicts, job_id=request.job_id)
 
 
 if __name__ == "__main__":
