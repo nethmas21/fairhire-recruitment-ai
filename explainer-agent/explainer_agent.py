@@ -4,7 +4,9 @@ FairHire - Explainer Agent
 Job: This agent has FOUR responsibilities:
   1. Explain why each candidate ranked where they did (LLM)
   2. Audit the ranking results for bias patterns (proxy-field monitoring)
-  3. Generate tailored interview questions once a candidate is accepted (LLM)
+  3. Generate tailored interview questions once a candidate is accepted (LLM) -
+     grounded in the candidate's actual anonymized CV text (projects, tools,
+     specific experience), not just their flat skill-keyword list
   4. Generate skills-gap feedback for "near-miss" candidates - people who were
      close but didn't qualify, telling them specifically what to improve
      (this is the differentiator feature - most systems just reject silently)
@@ -39,10 +41,11 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 
 # Import the shared database module (lives in ../database relative to this file)
 sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "database"))
-from db import init_db, save_ranking, log_bias_audit
+from db import init_db, save_ranking, log_bias_audit, get_job, get_candidate, get_rankings_for_job
+from auth import verify_api_key
 
 import google.generativeai as genai
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Depends
 from pydantic import BaseModel
 
 # --- Config ---
@@ -53,7 +56,7 @@ BIAS_FLAG_GAP_THRESHOLD = 0.15  # how much difference between groups triggers a 
 API_KEY = os.environ.get("GEMINI_API_KEY", "")
 if API_KEY:
     genai.configure(api_key=API_KEY)
-    model = genai.GenerativeModel("gemini-3.6-flash")
+    model = genai.GenerativeModel("gemini-3.5-flash-lite")
 else:
     model = None  # allows the file to still be imported/tested without a key
 
@@ -62,19 +65,44 @@ def call_llm(prompt: str) -> str:
     """Central place all LLM calls go through - makes it easy to swap providers."""
     if model is None:
         return "[LLM not configured - set GEMINI_API_KEY to enable real responses]"
-    response = model.generate_content(prompt)
-    return response.text.strip()
+    try:
+        response = model.generate_content(prompt)
+        return response.text.strip()
+    except Exception as e:
+        # Never let an LLM failure (quota limit, model renamed, network
+        # issue, etc.) crash the whole request - this is the exact bug
+        # that caused a 500 error when the free-tier quota was exceeded.
+        return f"[LLM explanation unavailable right now: {type(e).__name__}]"
 
 
 # ---------------------------------------------------------------
 # 1. EXPLANATION - why did this candidate rank where they did?
 # ---------------------------------------------------------------
+# Phrases that mean the LLM is speculating about WHY the scoring system or
+# algorithm behaved a certain way (e.g. "parsing failed to recognize skills")
+# rather than just describing the skill overlap. The Explainer Agent has no
+# actual visibility into the Matcher Agent's internals, so any such claim is
+# an unverifiable guess dressed up as fact - never something to trust.
+SCORE_MECHANICS_PHRASES = [
+    "parsing", "algorithm failed", "algorithm struggled", "failed to recognize",
+    "failed to properly recognize", "scoring algorithm", "automated parsing",
+    "evaluation system", "system failed", "system struggled", "system's",
+]
+
+# Phrases implying a poor/low match - checked against the actual matched vs
+# missing skill counts to catch the LLM asserting a narrative the real data
+# contradicts (e.g. calling it a "low match" when 11 of 12 skills matched).
+LOW_MATCH_PHRASES = ["low score", "low match", "poor match", "poor fit", "weak match"]
+
+
 def generate_explanation(candidate: dict, job_description: str) -> dict:
     """
     Generates the LLM explanation, then runs a lightweight NLP consistency
     check: does the explanation actually mention skills the candidate really
-    has? This is the Explainer Agent's NLP component - it doesn't trust the
-    LLM's output blindly, it verifies it against the real structured data.
+    has, avoid speculating about the scoring system's internals, and avoid
+    contradicting the candidate's actual matched/missing skill counts? This
+    is the Explainer Agent's NLP component - it doesn't trust the LLM's
+    output blindly, it verifies it against the real structured data.
     """
     prompt = f"""You are explaining a candidate ranking to a recruiter.
 
@@ -83,28 +111,67 @@ Candidate skills: {', '.join(candidate.get('skills', []))}
 Candidate's match score: {candidate.get('final_score', 'N/A')}
 
 Write a 2-sentence, plain-English explanation of why this candidate received
-this ranking, mentioning specific matched skills. Do not mention name, age,
-or gender - this data was not provided and should never be referenced."""
+this ranking, mentioning specific matched skills.
+
+Base your explanation ONLY on the skills listed above and the score given -
+describe what the skill overlap looks like, not why the scoring system or
+algorithm behaved a certain way. Do NOT speculate about parsing errors,
+algorithm failures, or system limitations - you have no visibility into how
+the score was actually computed, so any claim about the scoring mechanics
+would be an unverifiable guess, not a fact. If the score seems surprising
+given the skill list, simply describe the skills and score as given without
+inventing a reason for the apparent mismatch.
+
+Do not mention name, age, or gender - this data was not provided and should
+never be referenced."""
     explanation_text = call_llm(prompt)
 
     # --- NLP consistency check (no LLM needed - fast, deterministic) ---
     actual_skills = [s.lower() for s in candidate.get("skills", [])]
+    missing_skills = candidate.get("missing_skills", []) or []
+    final_score = candidate.get("final_score")
     explanation_lower = explanation_text.lower()
+
     mentioned_real_skills = [s for s in actual_skills if s in explanation_lower]
-    consistency_ok = len(mentioned_real_skills) > 0 if actual_skills else True
+    skills_grounded = len(mentioned_real_skills) > 0 if actual_skills else True
+
+    mechanics_speculation = any(p in explanation_lower for p in SCORE_MECHANICS_PHRASES)
+
+    implies_low_match = any(p in explanation_lower for p in LOW_MATCH_PHRASES)
+    matched_count = len(actual_skills)
+    missing_count = len(missing_skills)
+    strong_actual_match = (
+        (final_score is not None and final_score >= 0.5) or
+        (matched_count > 0 and missing_count <= max(1, matched_count // 4))
+    )
+    contradicts_data = implies_low_match and strong_actual_match
+
+    consistency_ok = skills_grounded and not mechanics_speculation and not contradicts_data
+
+    notes = []
+    if not skills_grounded:
+        notes.append("Explanation does not clearly reference the candidate's actual listed skills.")
+    if mechanics_speculation:
+        notes.append("Explanation speculates about WHY the scoring system/algorithm behaved a "
+                      "certain way (e.g. parsing or system failures) - this can't be verified from "
+                      "the data available and should be treated as unreliable commentary, not fact.")
+    if contradicts_data:
+        notes.append(f"Explanation implies a low/poor match, but the actual data shows "
+                      f"{matched_count} matched vs {missing_count} missing skills "
+                      f"(final_score={final_score}) - this looks like a contradiction worth a "
+                      f"manual check before trusting the explanation.")
+
+    note = " ".join(notes) if notes else (
+        "Explanation references at least one of the candidate's actual skills and is "
+        "consistent with the scoring data - grounded in real data."
+    )
 
     return {
         "explanation": explanation_text,
         "consistency_check": {
             "passed": consistency_ok,
             "skills_confirmed_in_text": mentioned_real_skills,
-            "note": (
-                "Explanation references at least one of the candidate's actual "
-                "skills - grounded in real data."
-                if consistency_ok else
-                "Warning: explanation does not clearly reference the candidate's "
-                "actual listed skills - worth a manual check before trusting it."
-            ),
+            "note": note,
         },
         # --- THE VERIFIABILITY FIX ---
         # This raw data is shown to the recruiter ALONGSIDE the explanation
@@ -162,6 +229,14 @@ def audit_bias(ranked_candidates: List[dict]) -> dict:
 # 3. INTERVIEW QUESTIONS - generated once a candidate is accepted
 # ---------------------------------------------------------------
 def generate_interview_questions(candidate: dict, job_description: str) -> List[str]:
+    """
+    Older, skill-list-only version - kept for backward compatibility with
+    any caller that only has scores/skills on hand and no stored CV text
+    (e.g. sample/test data that never went through the Reader Agent).
+    Prefer generate_interview_questions_from_cv() below whenever real
+    anonymized CV text is available - it produces far more specific,
+    genuinely CV-grounded questions.
+    """
     prompt = f"""Generate 5 tailored interview questions for this candidate.
 
 Job description: {job_description}
@@ -172,6 +247,103 @@ addressing any gap between their skills and the job requirements. Return
 just the 5 questions, one per line, no extra commentary."""
     response = call_llm(prompt)
     return [q.strip("- ").strip() for q in response.split("\n") if q.strip()]
+
+
+def generate_interview_questions_from_cv(job_title: str, job_description: str,
+                                          cv_text: str, matched_skills: List[str],
+                                          missing_skills: List[str],
+                                          projects_text: Optional[str] = None) -> List[str]:
+    """
+    The CV-grounded version: instead of only knowing a flat skill list, this
+    gives the LLM the candidate's actual (PII-stripped) CV text - project
+    names, tools used, metrics claimed, responsibilities described - and
+    asks for questions that reference those SPECIFIC details. This is what
+    makes the questions "really based on the CV" rather than generic
+    per-skill boilerplate that could apply to any candidate with the same
+    skill list.
+
+    When projects_text is available (extracted separately by the Reader
+    Agent via extract_projects_section), it's surfaced to the LLM as its
+    own clearly-labeled block and the prompt REQUIRES a guaranteed number
+    of questions tied to it - this is what makes project-specific
+    questions reliable rather than hoping the LLM notices project details
+    on its own inside a much larger, undifferentiated CV text block.
+
+    Falls back to the skill-list-only prompt if no CV text was stored for
+    this candidate (e.g. they were added via the sample-data path rather
+    than a real uploaded CV).
+    """
+    if not cv_text:
+        return generate_interview_questions(
+            {"skills": matched_skills, "missing_skills": missing_skills}, job_description
+        )
+
+    projects_block = ""
+    project_instruction = (
+        "- At least 3 questions must reference a SPECIFIC project, tool, metric, or "
+        "responsibility actually mentioned in the CV text above - be concrete "
+        "(e.g. ask them to walk through a named project's approach, a specific "
+        "result they claimed, or a tool they say they used), not generic."
+    )
+    if projects_text:
+        projects_block = f"""
+
+The candidate's PROJECTS section, extracted separately (this is the most
+important source for your questions - draw heavily on it):
+
+---
+{projects_text}
+---"""
+        project_instruction = (
+            "- At least 3 questions MUST each be about a DIFFERENT project from the "
+            "PROJECTS section above - name the specific project (or its core "
+            "technology/technique) directly in the question, and ask about a "
+            "concrete choice they made, a result they claimed, a challenge they "
+            "likely faced, or a trade-off in their approach. Do not write a "
+            "generic question that could apply to any project - it must be clear "
+            "from the question text which specific project you mean."
+        )
+
+    prompt = f"""You are preparing interview questions for a hiring panel.
+
+Job title: {job_title}
+Job description: {job_description}
+
+Below is the candidate's CV text (personal identifying details like name,
+email, and phone have already been removed - do not attempt to guess or
+reference who this is, only what they wrote about their work):
+
+---
+{cv_text}
+---{projects_block}
+
+Matched skills (present in both the CV and the job requirements): {', '.join(matched_skills) or 'none recorded'}
+Missing skills (in the job requirements but not clearly in the CV): {', '.join(missing_skills) or 'none recorded'}
+
+Write 6 interview questions for this specific candidate:
+{project_instruction}
+- At least 1 question should probe a gap between the missing skills and
+  the role, framed constructively (e.g. how they'd approach ramping up).
+- Keep each question to one or two sentences.
+- Do not mention or guess the candidate's name, age, gender, or any other
+  personal identifying detail.
+
+Return just the 6 questions, one per line, numbered 1-6, no extra
+commentary before or after the list."""
+
+    response = call_llm(prompt)
+    questions = [q.strip("- ").strip() for q in response.split("\n") if q.strip()]
+    # Strip any leading "1. " / "1)" numbering the LLM added, since the
+    # PDF/dashboard renders its own numbering.
+    cleaned = []
+    for q in questions:
+        stripped = q
+        for prefix_len in (2, 3, 4):
+            if len(stripped) > prefix_len and stripped[:prefix_len].rstrip(". )").isdigit():
+                stripped = stripped[prefix_len:].lstrip(". )").strip()
+                break
+        cleaned.append(stripped)
+    return cleaned
 
 
 # ---------------------------------------------------------------
@@ -218,12 +390,17 @@ class ExplainRequest(BaseModel):
     job_id: Optional[int] = None   # if provided, results update the saved ranking rows
 
 
+class InterviewQuestionsRequest(BaseModel):
+    candidate_id: str
+    job_id: int
+
+
 @app.get("/health")
 def health():
     return {"status": "ok", "agent": "explainer", "llm_configured": model is not None}
 
 
-@app.post("/explain")
+@app.post("/explain", dependencies=[Depends(verify_api_key)])
 def explain_endpoint(request: ExplainRequest):
     """
     Generates an explanation + skills-gap feedback for each candidate.
@@ -257,7 +434,7 @@ def explain_endpoint(request: ExplainRequest):
     return {"explanations": results}
 
 
-@app.post("/audit")
+@app.post("/audit", dependencies=[Depends(verify_api_key)])
 def audit_endpoint(request: ExplainRequest):
     """
     Runs the bias audit across all ranked candidates. If job_id is provided,
@@ -276,11 +453,47 @@ def audit_endpoint(request: ExplainRequest):
     return result
 
 
-@app.post("/interview-questions")
-def interview_questions_endpoint(candidate: Candidate, job_description: str):
-    """Called when a recruiter accepts a specific candidate for interview."""
-    return {"candidate_id": candidate.candidate_id,
-            "questions": generate_interview_questions(candidate.dict(), job_description)}
+@app.post("/interview-questions", dependencies=[Depends(verify_api_key)])
+def interview_questions_endpoint(request: InterviewQuestionsRequest):
+    """
+    Called when a recruiter accepts a specific candidate for interview.
+    Looks everything up from the shared database itself - the job's
+    description, the candidate's matched/missing skills from their
+    ranking, and (crucially) their anonymized CV text - rather than
+    requiring the caller to assemble and pass all of that manually. This
+    is what makes the questions genuinely grounded in the real CV instead
+    of whatever skill list happens to get passed in.
+    """
+    job = get_job(request.job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail=f"No job found with job_id={request.job_id}")
+
+    candidate = get_candidate(request.candidate_id)
+    if not candidate:
+        raise HTTPException(status_code=404, detail=f"No candidate found with candidate_id={request.candidate_id}")
+
+    rankings = get_rankings_for_job(request.job_id)
+    ranking = next((r for r in rankings if r["candidate_id"] == request.candidate_id), None)
+    matched_skills = ranking["matched_skills"] if ranking else candidate.get("skills", [])
+    missing_skills = ranking["missing_skills"] if ranking else []
+
+    questions = generate_interview_questions_from_cv(
+        job_title=job["title"],
+        job_description=job["description"],
+        cv_text=candidate.get("cv_text_anonymized") or "",
+        matched_skills=matched_skills,
+        missing_skills=missing_skills,
+        projects_text=candidate.get("projects_text") or None,
+    )
+
+    return {
+        "candidate_id": request.candidate_id,
+        "job_id": request.job_id,
+        "job_title": job["title"],
+        "questions": questions,
+        "cv_based": bool(candidate.get("cv_text_anonymized")),
+        "projects_found": bool(candidate.get("projects_text")),
+    }
 
 
 if __name__ == "__main__":
@@ -310,5 +523,5 @@ if __name__ == "__main__":
         if feedback:
             print(c["candidate_id"], "->", feedback)
 
-    print("\n=== Interview questions (top candidate) ===")
+    print("\n=== Interview questions (top candidate, skill-list-only fallback) ===")
     print(generate_interview_questions(sample_candidates[0], job_description))
