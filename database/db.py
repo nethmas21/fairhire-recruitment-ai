@@ -189,21 +189,98 @@ def get_rankings_for_job(job_id):
 # ---------------------------------------------------------------
 # Decisions log (human accept/reject - Accountability layer)
 # ---------------------------------------------------------------
-def log_decision(candidate_id, job_id, decision, reason=None,
-                  interview_date=None, interview_time=None, decided_by=None):
+def log_decision(candidate_id, job_id, decision, stage="shortlist", reason=None,
+                  interview_date=None, interview_time=None, interview_location=None,
+                  decided_by=None):
+    """
+    stage='shortlist' -> the recruiter's first decision, before any interview
+        decision='accepted' -> candidate gets an interview invite
+        decision='rejected' -> this is an EARLY rejection (never interviewed)
+    stage='final' -> the decision AFTER the interview happened
+        decision='accepted' -> candidate is hired
+        decision='rejected' -> this is a POST-INTERVIEW rejection
+
+    notified always starts at 0 - the actual email is sent separately
+    (either immediately, or in a batch later) and mark_notified() is
+    called once it's actually sent.
+    """
     with get_connection() as conn:
         conn.execute(
             """INSERT INTO decisions_log
-               (candidate_id, job_id, decision, reason, interview_date, interview_time, decided_by)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (candidate_id, job_id, decision, reason, interview_date, interview_time, decided_by),
+               (candidate_id, job_id, stage, decision, reason, interview_date,
+                interview_time, interview_location, decided_by, notified)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)""",
+            (candidate_id, job_id, stage, decision, reason, interview_date,
+             interview_time, interview_location, decided_by),
         )
+
+
+def get_pending_notifications(job_id, decision_filter=None):
+    """
+    Returns decisions that haven't been notified yet for this job.
+    decision_filter can be 'accepted' or 'rejected' to get just one type -
+    this is what lets the Dashboard offer a "send all pending rejection
+    emails" batch action instead of sending one at a time.
+    """
+    with get_connection() as conn:
+        if decision_filter:
+            rows = conn.execute(
+                """SELECT * FROM decisions_log
+                   WHERE job_id = ? AND notified = 0 AND decision = ?""",
+                (job_id, decision_filter),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM decisions_log WHERE job_id = ? AND notified = 0",
+                (job_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+
+def mark_notified(decision_id):
+    """Call this once the Notification Agent has actually generated/sent
+    the email for this decision, so it doesn't get sent again."""
+    with get_connection() as conn:
+        conn.execute("UPDATE decisions_log SET notified = 1 WHERE decision_id = ?", (decision_id,))
 
 
 def get_decisions_for_job(job_id):
     with get_connection() as conn:
         rows = conn.execute("SELECT * FROM decisions_log WHERE job_id = ?", (job_id,)).fetchall()
         return [dict(row) for row in rows]
+
+
+def get_notification_status(candidate_id, job_id):
+    """
+    Looks at this candidate's decision history for this job and works out
+    which of the 3 email types they should receive right now - so nobody
+    has to manually specify the status, it's derived from real decisions.
+
+    Returns one of: 'shortlisted', 'early_rejected', 'interview_rejected',
+    or None if no decision has been made yet (don't send anything).
+    """
+    with get_connection() as conn:
+        rows = conn.execute(
+            """SELECT * FROM decisions_log WHERE candidate_id = ? AND job_id = ?
+               ORDER BY created_at DESC, decision_id DESC""",
+            (candidate_id, job_id),
+        ).fetchall()
+
+    if not rows:
+        return None, None
+
+    latest = dict(rows[0])
+
+    if latest["stage"] == "final":
+        if latest["decision"] == "rejected":
+            return "interview_rejected", latest
+        else:
+            return None, latest  # accepted at final stage = hired, not a rejection email
+    else:  # stage == 'shortlist'
+        if latest["decision"] == "rejected":
+            return "early_rejected", latest
+        else:
+            return "shortlisted", latest
 
 
 # ---------------------------------------------------------------
