@@ -676,3 +676,4 @@ if __name__ == "__main__":
     result = process_cv(cv_path, candidate_id="CAND_001", job_id=job_id)
     print(json.dumps(result, indent=2))
     #commit
+    #coomit
