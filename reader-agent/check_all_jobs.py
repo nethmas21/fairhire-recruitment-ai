@@ -15,3 +15,4 @@ for row in conn.execute("SELECT candidate_id, job_id, cv_text_anonymized IS NOT 
     print(dict(row))
 
 conn.close()
+#commit
