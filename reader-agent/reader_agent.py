@@ -675,5 +675,4 @@ if __name__ == "__main__":
     job_id = int(sys.argv[2]) if len(sys.argv) > 2 else None
     result = process_cv(cv_path, candidate_id="CAND_001", job_id=job_id)
     print(json.dumps(result, indent=2))
-    #commit
-    #co
+    
