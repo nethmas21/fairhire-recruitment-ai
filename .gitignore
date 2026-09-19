@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.pyc
+venv/
+env/
+.venv/
+
+# Environment secrets
+.env
+*.key
+
+# Database files
+*.db
+*.sqlite3
+
+# spaCy / model downloads
+*.bin
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
