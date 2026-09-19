@@ -47,7 +47,7 @@ if API_KEY:
 else:
     model = None
 
-
+#1st layer: keyword scan - fast, deterministic, no LLM needed
 def call_llm(prompt: str) -> str:
     if model is None:
         return "[LLM not configured - set GEMINI_API_KEY to enable real responses]"
