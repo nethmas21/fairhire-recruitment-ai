@@ -8,9 +8,9 @@ and flags suggestions for the recruiter - who can revise or proceed anyway.
 
 This extends the three-layer fairness approach into four layers:
   0. Pre-Prevention (NEW) - catch bias in the job posting itself
-  1. Prevention        - PII blinding at CV intake
+  1. Prevention        - PII blinding at CV intake 
   2. Monitoring         - proxy-field bias auditing on rankings
-  3. Accountability     - human-in-the-loop + logging
+  3. Accountability     - human-in-the-loop + logging 
 
 Setup:
     pip install google-generativeai fastapi uvicorn
