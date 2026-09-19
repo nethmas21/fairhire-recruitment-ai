@@ -239,7 +239,7 @@ We'd like to keep your profile on file and encourage you to apply for
 future opportunities with us.
 {retention_note}
 Best regards,
-The Hiring Team
+The Hiring Team.
 """
 
 
@@ -515,4 +515,5 @@ if __name__ == "__main__":
     )
     print(result2["email_text"])
     print("Tone check:", result2["tone_check"])
-  # 1st commit  
+
+  
