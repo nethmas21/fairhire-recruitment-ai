@@ -1,5 +1,5 @@
 """
-FairHire - Job Description Fairness Checker
+FairHire - Job Description Fairness Checker 
 ----------------------------------------------
 Job: This is the NEW "Pre-Prevention" layer - runs BEFORE any candidates are
 processed. Analyzes the job description itself for language patterns known
