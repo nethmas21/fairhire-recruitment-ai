@@ -406,7 +406,7 @@ def notify_all_for_job_endpoint(request: NotifyJobRequest):
         retention_choice = pii["data_retention_choice"] if pii else "delete"
 
         # Pull this candidate's matched skills from their ranking record,
-        # so the LLM personalization line can reference something real.
+        # So the LLM personalization line can reference something real.
         job_rankings = get_rankings_for_job(request.job_id)
         matched = next((r["matched_skills"] for r in job_rankings
                         if r["candidate_id"] == candidate_id), [])
