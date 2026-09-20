@@ -140,7 +140,7 @@ def check_job_description(job_description: str) -> dict:
                 "The recruiter decides whether to revise or proceed.",
     }
 
-
+##2
 # ---------------------------------------------------------------
 # FastAPI wrapper
 # ---------------------------------------------------------------
@@ -199,3 +199,4 @@ if __name__ == "__main__":
         "10+ years of experience in every BI tool imaginable."
     )
     print(json.dumps(check_job_description(sample_jd), indent=2))
+ 
