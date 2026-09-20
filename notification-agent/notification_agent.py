@@ -196,7 +196,7 @@ Please confirm your availability by replying to this email. We look
 forward to speaking with you.
 
 Best regards,
-The Hiring Team
+The Hiring Team.
 """
 
 
