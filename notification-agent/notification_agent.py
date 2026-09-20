@@ -189,8 +189,8 @@ Dear {candidate_name},
 Thank you for applying for the {job_title} position. We're pleased to let
 you know that you've been shortlisted for an interview. {personalized_line}
 
-Interview date: {interview_date}
-Interview time: {interview_time}
+Interview Date: {interview_date}
+Interview Time: {interview_time}
 {location_line}
 Please confirm your availability by replying to this email. We look
 forward to speaking with you.
