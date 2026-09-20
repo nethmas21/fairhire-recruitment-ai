@@ -195,7 +195,7 @@ Interview Time: {interview_time}
 Please confirm your availability by replying to this email. We look
 forward to speaking with you.
 
-Best regards,
+Best Regards,
 The Hiring Team.
 """
 
@@ -216,7 +216,7 @@ demographic characteristics.
 We encourage you to apply for future openings that match your skills and
 experience.
 {retention_note}
-Best regards,
+Best Regards,
 The Hiring Team.
 """
 
