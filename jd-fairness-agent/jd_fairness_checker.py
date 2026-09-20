@@ -163,7 +163,7 @@ class ConfirmJobRequest(BaseModel):
 def health():
     return {"status": "ok", "agent": "jd_fairness_checker", "llm_configured": model is not None}
 
-
+##5
 @app.post("/check", dependencies=[Depends(verify_api_key)])
 def check_endpoint(request: JDRequest):
     """
