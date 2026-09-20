@@ -50,6 +50,8 @@ import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
+from textblob import TextBlob
+
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -142,21 +144,53 @@ def send_email(to_address: str, email_text: str) -> dict:
 # clinical-sounding words so a rejection email never accidentally reads
 # as cold, even if the LLM personalization above introduced one.
 # ---------------------------------------------------------------
+# ---------------------------------------------------------------
+# NLP component: tone checking on generated email text.
+#
+# Two layers, kept deliberately separate:
+#   1. Keyword scan (HARSH_WORDS)   - catches specific clinical/harsh
+#      words a template or the LLM might use ("rejected", "insufficient").
+#      Fast, exact, explainable - but blind to *overall* tone if no
+#      single flagged word appears.
+#   2. Sentiment scoring (TextBlob) - a lexicon-based NLP technique that
+#      scores the emotional polarity of the WHOLE email from -1.0 (very
+#      negative) to +1.0 (very positive), catching cases where no single
+#      "harsh word" appears but the email still reads coldly overall.
+# Neither layer blocks sending - both only flag, so the Dashboard can
+# review before an email goes out, without ever silently losing one.
+# ---------------------------------------------------------------
 HARSH_WORDS = [
     "unfortunately", "failed", "reject", "rejected", "insufficient",
     "inadequate", "not good enough", "disqualified", "denied",
 ]
 
+# Below this compound polarity score, the email is considered to read as
+# emotionally negative overall (not just containing one harsh word).
+# -1.0 = most negative, +1.0 = most positive, 0 = neutral.
+NEGATIVE_SENTIMENT_THRESHOLD = -0.15
+
 
 def tone_check(email_text: str) -> dict:
     text_lower = email_text.lower()
     found = [w for w in HARSH_WORDS if re.search(r"\b" + re.escape(w) + r"\b", text_lower)]
+
+    polarity = TextBlob(email_text).sentiment.polarity
+    sentiment_flagged = polarity < NEGATIVE_SENTIMENT_THRESHOLD
+
+    passed = (len(found) == 0) and (not sentiment_flagged)
+
+    notes = []
+    if found:
+        notes.append("contains words that may read as harsh")
+    if sentiment_flagged:
+        notes.append(f"overall sentiment scores negative ({polarity:.2f})")
+    note = "; ".join(notes) if notes else "No harsh language detected; overall tone reads neutral-to-positive."
+
     return {
-        "passed": len(found) == 0,
+        "passed": passed,
         "harsh_words_found": found,
-        "note": ("Consider softening this email - it contains words that "
-                  "may read as harsh." if found else
-                  "No harsh/clinical language detected."),
+        "sentiment_score": round(polarity, 3),
+        "note": note,
     }
 
 
