@@ -52,7 +52,7 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 # Import the shared database module (lives in ../database relative to this file)
 sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "database"))
 from db import init_db, save_candidate, save_ranking, get_job
-from auth import verify_api_key
+from shared.auth import verify_api_key
 
 from typing import List, Optional
 from fastapi import FastAPI, Depends
