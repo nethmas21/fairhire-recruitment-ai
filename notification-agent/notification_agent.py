@@ -249,7 +249,7 @@ def _retention_note(choice, candidate_id=None):
     this system actually asks the candidate for a retention preference
     before this point - "choice" here is only ever the "delete" default
     from save_pii(), never something the candidate actually chose. The
-    old copy ("As you requested...") was therefore misleading, since no
+    old copy ("As you requested....") was therefore misleading, since no
     request was ever made.
 
     This version instead tells the candidate the CURRENT default and
