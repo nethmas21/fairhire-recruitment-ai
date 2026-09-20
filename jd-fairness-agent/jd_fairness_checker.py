@@ -158,7 +158,7 @@ class ConfirmJobRequest(BaseModel):
     job_description: str
     proceed_despite_flags: bool = False  # recruiter's explicit choice
 
-
+##4
 @app.get("/health")
 def health():
     return {"status": "ok", "agent": "jd_fairness_checker", "llm_configured": model is not None}
