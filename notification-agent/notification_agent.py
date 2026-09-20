@@ -260,10 +260,10 @@ def _retention_note(choice, candidate_id=None):
     back to a generic note with no links.
     """
     current_plan = {
-        "delete": "delete your application data once this role is closed",
-        "similar_roles": "keep your profile on file to consider you for similar roles over the next 6 months",
-        "indefinite": "keep your profile in our talent pool indefinitely",
-    }.get(choice, "delete your application data once this role is closed")
+        "delete": "Delete your application data once this role is closed",
+        "similar_roles": "Keep your profile on file to consider you for similar roles over the next 6 months",
+        "indefinite": "Keep your profile in our talent pool indefinitely",
+    }.get(choice, "Delete your application data once this role is closed")
 
     if not candidate_id:
         return (f"\nBy default, we will {current_plan}. Reply to this email if "
