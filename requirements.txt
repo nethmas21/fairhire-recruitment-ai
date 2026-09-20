@@ -11,6 +11,8 @@ sqlalchemy
 pyjwt
 bcrypt
 anthropic
+google-generativeai
 python-dotenv
 requests
 numpy
+textblob
