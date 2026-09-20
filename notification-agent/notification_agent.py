@@ -217,7 +217,7 @@ We encourage you to apply for future openings that match your skills and
 experience.
 {retention_note}
 Best regards,
-The Hiring Team
+The Hiring Team.
 """
 
 
