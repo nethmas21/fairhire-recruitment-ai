@@ -493,7 +493,7 @@ def candidate_preference_endpoint(candidate_id: str, choice: str):
 
 
 if __name__ == "__main__":
-    # Example usage - swap these with real candidate/dashboard data later
+    # Example usage - Swap these with real candidate/dashboard data later
     result1 = generate_notification(
         candidate_name="Candidate A",
         job_title="Data Analyst",
