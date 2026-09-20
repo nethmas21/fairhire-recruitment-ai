@@ -152,7 +152,7 @@ class JDRequest(BaseModel):
     job_description: str
     title: str = "Untitled role"
 
-
+##3
 class ConfirmJobRequest(BaseModel):
     title: str
     job_description: str
