@@ -191,7 +191,7 @@ def confirm_and_post_endpoint(request: ConfirmJobRequest):
         "posted_despite_flags": bool(check_result["keyword_flags"]) and request.proceed_despite_flags,
     }
 
-
+##6
 if __name__ == "__main__":
     sample_jd = (
         "We're looking for a rockstar Data Analyst who can dominate the "
