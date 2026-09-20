@@ -180,7 +180,7 @@ def personalize_shortlist_line(candidate_name, job_title, matched_skills):
 
 def shortlist_email(candidate_name, job_title, interview_date, interview_time,
                      interview_location=None, matched_skills=None):
-    location_line = f"Interview location: {interview_location}\n" if interview_location else ""
+    location_line = f"Interview Location: {interview_location}\n" if interview_location else ""
     personalized_line = personalize_shortlist_line(candidate_name, job_title, matched_skills or [])
     return f"""Subject: You've been shortlisted for {job_title}
 
